@@ -1,45 +1,84 @@
 # FastAPI Webhook Billing Case
 
-Este projeto implementa um fluxo SaaS de assinaturas com foco em webhook de produção:
-- idempotência transacional no banco;
-- segurança de assinatura (HMAC) com anti-replay;
-- retries internos e DLQ básico;
-- versionamento de API (`/v1`);
-- simulador de provedor para QA/demo.
+Production-oriented SaaS subscription flow focused on **robust webhook handling**, **security**, and **state consistency**.
 
-## Arquitetura
-Camadas:
-- `app/api.py`: endpoints FastAPI, validação de assinatura, rate-limit, allowlist.
-- `app/services.py`: casos de uso (`process_webhook`, `create_subscription`, jobs, retries).
-- `app/models.py`: entidades SQLModel + schemas Pydantic + enums.
-- `app/repositories.py`: engine/session e bootstrap de tabelas.
+---
 
-Fluxo de webhook (inbox-style):
-1. Recebe `POST /v1/webhooks/{provider}`.
-2. Valida assinatura e timestamp na borda.
-3. Tenta inserir `WebhookEvent` com `UNIQUE(provider, event_id)`.
-4. Processa evento de domínio (handlers por `event_type`).
-5. Marca `processed`/`ignored`/`failed` na mesma unidade transacional.
+## 🚀 Overview
 
-## Idempotência e Atomicidade
-- Constraint: `UNIQUE(provider, event_id)` em `WebhookEvent`.
-- Em concorrência paralela:
-  - primeira request insere e processa;
-  - segunda request recebe `IntegrityError`, recarrega o evento e aplica fluxo de idempotência.
-- Anti-replay para duplicado:
-  - se `signature_timestamp` diverge: `403` + `failed`;
-  - se `signature` diverge: `403` + `failed`.
+This project implements a subscription billing backend with:
 
-## Estado da Assinatura
-Estados:
+- Transactional idempotency at the database level
+- HMAC signature validation with anti-replay protection
+- Internal retries and basic DLQ mechanism
+- API versioning (`/v1`)
+- Provider simulator for QA and demos
+
+---
+
+# 🏗 Architecture
+
+## Layers
+
+- **app/api.py**  
+  FastAPI endpoints, signature validation, rate limiting, allowlist.
+
+- **app/services.py**  
+  Use cases (process_webhook, create_subscription, jobs, retries).
+
+- **app/models.py**  
+  SQLModel entities + Pydantic schemas + enums.
+
+- **app/repositories.py**  
+  Engine/session setup and table bootstrap.
+
+---
+
+# 📥 Webhook Flow (Inbox Pattern)
+
+1. Receives `POST /v1/webhooks/{provider}`
+2. Validates signature and timestamp at the edge
+3. Attempts to insert `WebhookEvent` with `UNIQUE(provider, event_id)`
+4. Processes domain event (handler per `event_type`)
+5. Marks as `processed / ignored / failed` inside the same transaction
+
+---
+
+# 🔁 Idempotency & Atomicity
+
+### Database Constraint
+
+```sql
+UNIQUE(provider, event_id)
+```
+
+### Under Parallel Concurrency
+
+- First request → inserts and processes
+- Second request → raises `IntegrityError`
+- Event is reloaded and idempotency logic is applied
+
+### Anti-Replay Logic
+
+If:
+- `signature_timestamp` differs → `403 + failed`
+- `signature` differs → `403 + failed`
+
+---
+
+# 🧾 Subscription State Machine
+
+## States
+
 - `pending_activation`
 - `active`
 - `past_due`
 - `canceled`
 - `expired`
 
-Diagrama simples:
-```text
+## State Diagram
+
+```
 pending_activation --payment.succeeded--> active
 active --invoice.payment_failed--> past_due
 past_due --payment.succeeded--> active
@@ -48,25 +87,34 @@ active --expire_subscriptions(job)--> expired
 active + cancel_at_period_end=true --expire_subscriptions(job)--> canceled
 ```
 
-Campos de governança:
+---
+
+## Governance Fields
+
 - `cancel_at_period_end`
 - `past_due_since`
 - `canceled_at`
 - `expired_at`
 - `access_revoked`
 
-## Segurança
-Implementado:
-- HMAC SHA-256 (`X-Webhook-Timestamp` + `X-Webhook-Signature`).
-- Replay window por timestamp (`WEBHOOK_MAX_SKEW_SECONDS`).
-- Rate limit in-memory por `provider+ip`.
-- IP allowlist opcional (`WEBHOOK_IP_ALLOWLIST`).
-- Segredos por ambiente (`WEBHOOK_SECRETS_JSON`) com rotação:
-  - `current`
-  - `previous`
-  - `keys` por `X-Webhook-Key-Id`
+---
 
-Exemplo `WEBHOOK_SECRETS_JSON`:
+# 🔐 Security
+
+### Implemented
+
+- HMAC SHA-256  
+  (`X-Webhook-Timestamp + X-Webhook-Signature`)
+- Replay window validation (`WEBHOOK_MAX_SKEW_SECONDS`)
+- In-memory rate limiting per provider + IP
+- Optional IP allowlist (`WEBHOOK_IP_ALLOWLIST`)
+- Environment-based secrets with rotation (`WEBHOOK_SECRETS_JSON`)
+- Key selection via `X-Webhook-Key-Id`
+
+---
+
+## Example `WEBHOOK_SECRETS_JSON`
+
 ```json
 {
   "stripe": {
@@ -81,24 +129,40 @@ Exemplo `WEBHOOK_SECRETS_JSON`:
 }
 ```
 
-## Retry e DLQ
-`WebhookEvent` possui:
+---
+
+# 🔄 Retry & DLQ
+
+## WebhookEvent Fields
+
 - `attempt_count`
 - `next_retry_at`
-- `needs_attention` (DLQ básico após 3 falhas)
+- `needs_attention` (basic DLQ after 3 failures)
 
-Jobs/endpoints:
+## Retry Endpoints
+
 - `POST /v1/jobs/retry-failed-webhooks`
 - `POST /v1/admin/webhooks/{event_id}/reprocess`
 
-## Versionamento e Contrato
-API versionada em `/v1`.
+---
 
-Schemas por tipo de evento:
+# 🧩 Versioning & Contract
+
+API is versioned under:
+
+```
+/v1
+```
+
+### Event Schemas
+
 - `PaymentSucceededPayload`
 - `InvoicePaymentFailedPayload`
 
-Webhook de entrada:
+---
+
+# 📦 Incoming Webhook Example
+
 ```json
 {
   "event_id": "evt_123",
@@ -115,44 +179,89 @@ Webhook de entrada:
 }
 ```
 
-## Simulador de Provedor
+---
+
+# 🧪 Provider Simulator
+
 Endpoint:
-- `POST /v1/simulate/{provider}/{event_type}`
 
-O simulador:
-1. Gera payload normalizado válido.
-2. Assina com o secret do provedor.
-3. Chama internamente `/v1/webhooks/{provider}`.
-4. Retorna status e resposta do webhook.
+```
+POST /v1/simulate/{provider}/{event_type}
+```
 
-Exemplo:
+The simulator:
+
+- Generates a normalized payload
+- Signs it using provider secret
+- Internally calls `/v1/webhooks/{provider}`
+- Returns webhook status and response
+
+### Example
+
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/simulate/test/payment.succeeded
 ```
 
-## Como Rodar Local
-1. Instalar dependências:
+---
+
+# 🖥 Running Locally
+
+## Install dependencies
+
 ```bash
 poetry install --no-root
 ```
 
-2. Subir API:
+## Start API
+
 ```bash
 poetry run uvicorn main:app --reload
 ```
 
-3. Métricas:
-- JSON interno: `GET /v1/admin/metrics`
-- Prometheus: `GET /v1/metrics`
+---
 
-## Como Testar
+# 📊 Metrics
+
+- Internal JSON:  
+  `GET /v1/admin/metrics`
+
+- Prometheus format:  
+  `GET /v1/metrics`
+
+---
+
+# 🧪 Testing
+
 ```bash
 poetry run pytest -q
 ```
 
-## Decisões e Tradeoffs
-- SQLite + SQLModel para acelerar iteração local; migração para Postgres é natural.
-- Retry/DLQ no próprio banco simplifica operação inicial, mas fila externa é recomendada em escala.
-- Rate-limit/allowlist in-memory são suficientes para demo e dev; em produção distribuída usar gateway/redis.
-- `create_all` foi mantido por simplicidade; para produção contínua, usar Alembic.
+---
 
+# ⚖️ Decisions & Tradeoffs
+
+- **SQLite + SQLModel**  
+  Chosen for fast local iteration. Migrating to PostgreSQL is straightforward.
+
+- **Retry/DLQ in database**  
+  Simplifies initial operation. External queue recommended at scale.
+
+- **In-memory rate limiting & allowlist**  
+  Suitable for demo/dev. Production should use gateway or Redis.
+
+- **create_all usage**  
+  Kept for simplicity. In continuous production environments, Alembic migrations are recommended.
+
+---
+
+# 🎯 Production Notes
+
+This implementation demonstrates:
+
+- Strong idempotency guarantees
+- Transactional integrity
+- Security-first webhook validation
+- Clear subscription state management
+- Operational observability
+
+Designed for real-world SaaS billing scenarios.
